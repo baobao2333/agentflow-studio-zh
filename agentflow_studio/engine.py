@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,9 @@ def create_run(
         "decisions": [],
         "rule_gaps": [],
         "history": [],
+        "agents": {},
     }
+    mount_workflow_agents(root, state, workflow)
     append_history(state, "run_created", {"node": first_node})
     write_json(state_path, state)
     append_timeline(root, state, "run_created", {"node": first_node})
@@ -48,6 +51,11 @@ def step_run(*, root: Path, state_path: Path) -> dict[str, Any]:
         return state
 
     workflow = read_yaml(root / state["workflow_path"])
+    if "agents" not in state:
+        state["agents"] = {}
+        mount_workflow_agents(root, state, workflow)
+        write_json(state_path, state)
+
     node = find_node(workflow, state["phase"])
 
     if node.get("kind") == "human_gate":
@@ -60,10 +68,29 @@ def step_run(*, root: Path, state_path: Path) -> dict[str, Any]:
     if adapter is None:
         raise ValueError(f"Unknown adapter: {adapter_name}")
 
+    agent_id = node.get("agent")
+    if agent_id and not agent_is_enabled(state, agent_id):
+        state["status"] = "failed"
+        payload = {"node": node["id"], "agent": agent_id, "error": f"Agent disabled or not mounted: {agent_id}"}
+        append_history(state, "node_failed", payload)
+        append_timeline(root, state, "node_failed", payload)
+        write_json(state_path, state)
+        raise RuntimeError(payload["error"])
+
     append_history(state, "node_started", {"node": node["id"]})
     append_timeline(root, state, "node_started", {"node": node["id"]})
     state["status"] = "working"
     state["active_node"] = node["id"]
+    state["active_nodes"] = [node["id"]]
+    if agent_id:
+        state["active_agents"] = [
+            {
+                "agent": agent_id,
+                "node": node["id"],
+                "title": node.get("title", node["id"]),
+                "started_at": now_iso(),
+            }
+        ]
     state["heartbeat_at"] = now_iso()
     write_json(state_path, state)
 
@@ -71,6 +98,9 @@ def step_run(*, root: Path, state_path: Path) -> dict[str, Any]:
         result = adapter(root=root, state=state, node=node)
     except Exception as exc:
         state["status"] = "failed"
+        state.pop("active_agents", None)
+        state.pop("active_nodes", None)
+        state.pop("heartbeat_at", None)
         append_history(state, "node_failed", {"node": node["id"], "error": str(exc)})
         append_timeline(root, state, "node_failed", {"node": node["id"], "error": str(exc)})
         write_json(state_path, state)
@@ -92,6 +122,8 @@ def step_run(*, root: Path, state_path: Path) -> dict[str, Any]:
 
     next_node = resolve_next(node, result.status)
     state.pop("active_node", None)
+    state.pop("active_nodes", None)
+    state.pop("active_agents", None)
     state.pop("heartbeat_at", None)
     move_to_next(state, next_node)
     write_json(state_path, state)
@@ -158,11 +190,138 @@ def recover_failed_run(
     state["phase"] = target
     state["status"] = "running"
     state.pop("active_node", None)
+    state.pop("active_nodes", None)
+    state.pop("active_agents", None)
     state.pop("heartbeat_at", None)
     append_history(state, "failed_recovery", payload)
     write_json(state_path, state)
     append_timeline(root, state, "failed_recovery", payload)
     return state
+
+
+def ensure_studio_agents(root: Path, state_path: Path) -> dict[str, Any]:
+    state = read_json(state_path)
+    if "agents" in state:
+        return state
+
+    workflow = read_yaml(root / state["workflow_path"])
+    state["agents"] = {}
+    mount_workflow_agents(root, state, workflow)
+    write_json(state_path, state)
+    return state
+
+
+def import_studio_agent(root: Path, state_path: Path, agent_id: str) -> dict[str, Any]:
+    state = ensure_studio_agents(root, state_path)
+    mount_standard_agent(root, state, agent_id)
+    write_json(state_path, state)
+    return state
+
+
+def set_studio_agent_enabled(root: Path, state_path: Path, agent_id: str, enabled: bool) -> dict[str, Any]:
+    state = ensure_studio_agents(root, state_path)
+    if not enabled and agent_id in active_agent_ids(root, state):
+        raise ValueError(f"Cannot disable running agent: {agent_id}")
+
+    agent = state.get("agents", {}).get(agent_id)
+    if not agent:
+        raise ValueError(f"Agent not mounted: {agent_id}")
+    agent["status"] = "enabled" if enabled else "disabled"
+    write_json(state_path, state)
+    return state
+
+
+def delete_studio_agent(root: Path, state_path: Path, agent_id: str) -> dict[str, Any]:
+    state = ensure_studio_agents(root, state_path)
+    if agent_id in active_agent_ids(root, state):
+        raise ValueError(f"Cannot delete running agent: {agent_id}")
+
+    agent = state.get("agents", {}).pop(agent_id, None)
+    if agent:
+        copy_path = root / agent.get("copy", "")
+        agent_dir = (root / "runs" / state["run_id"] / "agents").resolve()
+        try:
+            copy_path.resolve().relative_to(agent_dir)
+        except ValueError:
+            pass
+        else:
+            copy_path.unlink(missing_ok=True)
+    write_json(state_path, state)
+    return state
+
+
+def mount_workflow_agents(root: Path, state: dict[str, Any], workflow: dict[str, Any]) -> bool:
+    changed = False
+    for agent_id in workflow_agent_ids(workflow):
+        changed = mount_standard_agent(root, state, agent_id) or changed
+    return changed
+
+
+def mount_standard_agent(root: Path, state: dict[str, Any], agent_id: str) -> bool:
+    agents = state.setdefault("agents", {})
+    if agent_id in agents:
+        return False
+
+    source = standard_agent_sources(root).get(agent_id)
+    if not source:
+        raise ValueError(f"Standard agent not found: {agent_id}")
+
+    copy_path = root / "runs" / state["run_id"] / "agents" / f"{slugify(agent_id)}.yaml"
+    copy_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source["path"], copy_path)
+    agents[agent_id] = {
+        "id": agent_id,
+        "name": source["data"].get("name", agent_id),
+        "status": "enabled",
+        "source": str(source["path"].relative_to(root)),
+        "copy": str(copy_path.relative_to(root)),
+        "mounted_at": now_iso(),
+    }
+    return True
+
+
+def standard_agent_sources(root: Path) -> dict[str, dict[str, Any]]:
+    agents: dict[str, dict[str, Any]] = {}
+    for path in sorted((root / "configs" / "agents").glob("*.yaml")):
+        data = read_yaml(path)
+        agent_id = data.get("id")
+        if agent_id:
+            agents[str(agent_id)] = {"path": path, "data": data}
+    return agents
+
+
+def workflow_agent_ids(workflow: dict[str, Any]) -> list[str]:
+    seen = []
+    for node in workflow.get("nodes", []):
+        agent_id = node.get("agent")
+        if agent_id and agent_id not in seen:
+            seen.append(agent_id)
+    return seen
+
+
+def agent_is_enabled(state: dict[str, Any], agent_id: str) -> bool:
+    agent = state.get("agents", {}).get(agent_id)
+    return bool(agent and agent.get("status") == "enabled")
+
+
+def active_agent_ids(root: Path, state: dict[str, Any]) -> set[str]:
+    if state.get("status") != "working":
+        return set()
+
+    agents = {item.get("agent") for item in state.get("active_agents", []) if item.get("agent")}
+    if agents:
+        return set(agents)
+
+    workflow = read_yaml(root / state["workflow_path"])
+    node_ids = state.get("active_nodes") or [state.get("active_node")]
+    for node_id in node_ids:
+        if not node_id:
+            continue
+        node = find_node(workflow, node_id)
+        agent_id = node.get("agent")
+        if agent_id:
+            agents.add(agent_id)
+    return set(agents)
 
 
 def find_node(workflow: dict[str, Any], node_id: str) -> dict[str, Any]:

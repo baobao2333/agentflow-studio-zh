@@ -9,7 +9,18 @@ from threading import Lock, Thread
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import read_json, read_yaml, write_json
-from .engine import create_run, find_node, recover_failed_run, resume_run, step_run
+from .engine import (
+    create_run,
+    delete_studio_agent,
+    ensure_studio_agents,
+    find_node,
+    import_studio_agent,
+    recover_failed_run,
+    resume_run,
+    set_studio_agent_enabled,
+    standard_agent_sources,
+    step_run,
+)
 from .markdown import render_markdown
 from .models import slugify
 from .render import render_dashboard, render_history_row, workflow_to_mermaid
@@ -48,9 +59,11 @@ def make_handler(root: Path, state_path: Path) -> type[BaseHTTPRequestHandler]:
                     if current.get("status") == "working":
                         current["status"] = "running"
                         current.pop("active_node", None)
+                        current.pop("active_nodes", None)
+                        current.pop("active_agents", None)
                         current.pop("heartbeat_at", None)
                         write_json(target_state_path, current)
-                step_run(root=root, state_path=target_state_path)
+                run_until_blocked(target_state_path)
             except Exception as exc:
                 print(f"Background step failed for {target_state_path}: {exc}")
             finally:
@@ -66,10 +79,27 @@ def make_handler(root: Path, state_path: Path) -> type[BaseHTTPRequestHandler]:
             return
 
         current = read_json(target_state_path)
-        if current.get("status") != "working":
-            return
+        if current.get("status") == "working":
+            start_step_worker(target_state_path, recover_working=True)
+        elif current.get("status") == "running":
+            start_step_worker(target_state_path)
 
-        start_step_worker(target_state_path, recover_working=True)
+    def run_until_blocked(target_state_path: Path) -> None:
+        steps = 0
+        while True:
+            current = read_json(target_state_path)
+            if current.get("status") != "running":
+                return
+
+            workflow = read_yaml(root / current["workflow_path"])
+            limit = len(workflow.get("nodes", [])) + int(current.get("max_iterations", 3))
+            step_run(root=root, state_path=target_state_path)
+            render_dashboard(root=root, state_path=target_state_path)
+            steps += 1
+
+            current = read_json(target_state_path)
+            if current.get("status") != "running" or steps >= limit:
+                return
 
     class AgentFlowHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -157,11 +187,38 @@ def make_handler(root: Path, state_path: Path) -> type[BaseHTTPRequestHandler]:
                     "steps": selection["steps"],
                 }
                 write_json(new_state_path, new_state)
+                start_step_worker(new_state_path)
                 render_dashboard(root=root, state_path=new_state_path)
                 self.redirect(f"/dashboard?studio={quote(run_id)}")
                 return
 
             current_state_path = selected_state_path(query, form)
+
+            if parsed.path == "/action/agent/import":
+                with action_lock:
+                    current = import_studio_agent(root, current_state_path, form["agent_id"][0])
+                    render_dashboard(root=root, state_path=current_state_path)
+                self.redirect(f"/dashboard?studio={quote(current['run_id'])}")
+                return
+
+            if parsed.path == "/action/agent/toggle":
+                with action_lock:
+                    current = set_studio_agent_enabled(
+                        root,
+                        current_state_path,
+                        form["agent_id"][0],
+                        form.get("enabled", ["false"])[0] == "true",
+                    )
+                    render_dashboard(root=root, state_path=current_state_path)
+                self.redirect(f"/dashboard?studio={quote(current['run_id'])}")
+                return
+
+            if parsed.path == "/action/agent/delete":
+                with action_lock:
+                    current = delete_studio_agent(root, current_state_path, form["agent_id"][0])
+                    render_dashboard(root=root, state_path=current_state_path)
+                self.redirect(f"/dashboard?studio={quote(current['run_id'])}")
+                return
 
             if parsed.path == "/action/resume":
                 with action_lock:
@@ -232,7 +289,7 @@ def make_handler(root: Path, state_path: Path) -> type[BaseHTTPRequestHandler]:
 
 
 def render_review_page(root: Path, state_path: Path, query: dict[str, list[str]]) -> str:
-    state = read_json(state_path)
+    state = ensure_studio_agents(root, state_path)
     artifact_key = query.get("artifact", [default_artifact_key(state)])[0]
     artifact_html = render_artifact_body(root, state, artifact_key)
     actions = render_actions(root, state)
@@ -283,7 +340,7 @@ def render_review_page(root: Path, state_path: Path, query: dict[str, list[str]]
 
 
 def render_dashboard_page(root: Path, state_path: Path, query: dict[str, list[str]]) -> str:
-    state = read_json(state_path)
+    state = ensure_studio_agents(root, state_path)
     workflow = read_yaml(root / state["workflow_path"])
     studio = quote(state["run_id"])
     mermaid = workflow_to_mermaid(workflow, state)
@@ -295,6 +352,7 @@ def render_dashboard_page(root: Path, state_path: Path, query: dict[str, list[st
     )
     active_node = state.get("active_node") or state["phase"]
     agent_console = render_agent_console(root, state, workflow)
+    agent_workload = render_agent_workload(root, state, workflow)
     plan = render_studio_plan(state)
     return page_shell(
         root,
@@ -315,6 +373,7 @@ def render_dashboard_page(root: Path, state_path: Path, query: dict[str, list[st
           </div>
         </section>
         {agent_console}
+        {agent_workload}
         {plan}
         <section class="panel artifact-strip">
           <h3>产物</h3>
@@ -338,7 +397,7 @@ def render_dashboard_page(root: Path, state_path: Path, query: dict[str, list[st
 
 
 def render_artifact_page(root: Path, state_path: Path, key: str) -> str:
-    state = read_json(state_path)
+    state = ensure_studio_agents(root, state_path)
     return page_shell(
         root,
         state,
@@ -390,7 +449,8 @@ def render_actions(root: Path, state: dict) -> str:
         <form method="post" action="/action/step?studio={studio}" class="actions">
           <input type="hidden" name="phase" value="{escape(state["phase"])}" />
           <input type="hidden" name="studio" value="{escape(state["run_id"])}" />
-          <button type="submit">推进下一步</button>
+          <p class="muted">自动执行已就绪；打开页面后会一路推进到 Human Gate、失败或完成。</p>
+          <button type="submit">立即自动执行</button>
         </form>
         """
 
@@ -422,8 +482,13 @@ def render_actions(root: Path, state: dict) -> str:
 
 def render_agent_console(root: Path, state: dict, workflow: dict) -> str:
     node = find_node(workflow, state["phase"]) if state.get("phase") != "__end__" else {}
-    agent = node.get("agent") or ("human gate" if node.get("kind") == "human_gate" else "system")
-    title = node.get("title", state.get("phase", ""))
+    active_agents = active_agent_entries(state, workflow)
+    if len(active_agents) > 1:
+        agent = f"{len(active_agents)} active agents"
+        title = "multi-agent execution"
+    else:
+        agent = active_agents[0]["agent"] if active_agents else node.get("agent") or ("human gate" if node.get("kind") == "human_gate" else "system")
+        title = active_agents[0]["title"] if active_agents else node.get("title", state.get("phase", ""))
     status_line = status_message(state, node)
     latest_messages = render_agent_messages(root, state)
     actions = render_actions(root, state)
@@ -451,12 +516,119 @@ def render_agent_console(root: Path, state: dict, workflow: dict) -> str:
     """
 
 
+def render_agent_workload(root: Path, state: dict, workflow: dict) -> str:
+    rows = "\n".join(render_agent_workload_row(item) for item in agent_workloads(root, state, workflow))
+    return f"""
+    <section class="agent-workload">
+      <div>
+        <p class="eyebrow">agent workload</p>
+        <h3>Studio Agents</h3>
+      </div>
+      <div class="agent-workload-grid">
+        {rows or "<p class='muted'>暂无挂载 Agent</p>"}
+      </div>
+    </section>
+    """
+
+
+def render_agent_workload_row(item: dict) -> str:
+    active_tasks = "".join(f"<li>{escape(task)}</li>" for task in item["active_tasks"])
+    if not active_tasks:
+        active_tasks = "<li class='muted'>idle</li>"
+    return f"""
+    <article class="agent-load-row">
+      <div>
+        <span class="status {escape(item['status'])}">{escape(item['status'])}</span>
+        <h4>{escape(item['name'])}</h4>
+        <code>{escape(item['id'])}</code>
+      </div>
+      <div class="agent-load-stats">
+        <span>{item['active_count']} active</span>
+        <span>{item['completed_count']} completed</span>
+        <span>{item['assigned_count']} assigned</span>
+      </div>
+      <ol>{active_tasks}</ol>
+    </article>
+    """
+
+
+def agent_workloads(root: Path, state: dict, workflow: dict) -> list[dict]:
+    node_by_id = {node["id"]: node for node in workflow.get("nodes", [])}
+    active_by_agent: dict[str, list[str]] = {}
+    for item in active_agent_entries(state, workflow):
+        active_by_agent.setdefault(item["agent"], []).append(item["title"])
+
+    completed_by_agent: dict[str, int] = {}
+    for item in state.get("history", []):
+        if item.get("event") != "node_completed":
+            continue
+        node = node_by_id.get(item.get("payload", {}).get("node"))
+        agent_id = node.get("agent") if node else ""
+        if agent_id:
+            completed_by_agent[agent_id] = completed_by_agent.get(agent_id, 0) + 1
+
+    assigned_by_agent: dict[str, int] = {}
+    for node in workflow.get("nodes", []):
+        agent_id = node.get("agent")
+        if agent_id:
+            assigned_by_agent[agent_id] = assigned_by_agent.get(agent_id, 0) + 1
+
+    rows = []
+    for agent_id, agent in sorted(state.get("agents", {}).items()):
+        active_tasks = active_by_agent.get(agent_id, [])
+        rows.append(
+            {
+                "id": agent_id,
+                "name": agent.get("name", agent_id),
+                "status": agent.get("status", "unknown"),
+                "active_tasks": active_tasks,
+                "active_count": len(active_tasks),
+                "completed_count": completed_by_agent.get(agent_id, 0),
+                "assigned_count": assigned_by_agent.get(agent_id, 0),
+            }
+        )
+    return rows
+
+
+def active_agent_entries(state: dict, workflow: dict) -> list[dict]:
+    if state.get("status") != "working":
+        return []
+
+    entries = []
+    for item in state.get("active_agents", []):
+        agent_id = item.get("agent")
+        if agent_id:
+            entries.append(
+                {
+                    "agent": agent_id,
+                    "node": item.get("node", ""),
+                    "title": item.get("title", item.get("node", "")),
+                }
+            )
+    if entries:
+        return entries
+
+    node_ids = state.get("active_nodes") or [state.get("active_node")]
+    for node_id in node_ids:
+        if not node_id:
+            continue
+        node = find_node(workflow, node_id)
+        entries.append(
+            {
+                "agent": node.get("agent", "system"),
+                "node": node_id,
+                "title": node.get("title", node_id),
+            }
+        )
+    return entries
+
+
 def status_message(state: dict, node: dict) -> str:
     status = state.get("status")
     if status == "working":
         return f"{node.get('title', state.get('phase'))} 正在执行，页面会自动刷新执行状态。"
     if status == "running":
-        return f"{node.get('title', state.get('phase'))} 已准备好，可以推进下一步。"
+        return f"{node.get('title', state.get('phase'))} 已进入自动执行队列，会继续推进到需要人工介入的位置。"
     if status == "paused":
         return node.get("prompt", "当前节点等待人工审阅。")
     if status == "failed":
@@ -522,6 +694,7 @@ def page_shell(
     refresh = '<meta http-equiv="refresh" content="5" />' if auto_refresh else ""
     sidebar = render_studio_sidebar(root, state)
     execution_dialog = render_execution_dialog(root, state)
+    agent_dialog = render_agent_management_dialog(root, state)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -576,6 +749,13 @@ def page_shell(
     .studio-link.active {{ color: var(--paper); border-left: 2px solid var(--blue); padding-left: 10px; }}
     .studio-title {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }}
     .studio-link small {{ color: var(--muted); overflow-wrap: anywhere; }}
+    .agent-dock {{ margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }}
+    .rail-heading {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--paper); margin-bottom: 10px; }}
+    .rail-heading button {{ padding: 5px 8px; font-size: 11px; }}
+    .agent-list {{ display: grid; gap: 8px; }}
+    .agent-compact {{ display: grid; gap: 2px; padding: 8px 0; border-bottom: 1px solid rgba(216,208,192,.1); }}
+    .agent-compact span {{ color: var(--paper); }}
+    .agent-compact small {{ color: var(--muted); overflow-wrap: anywhere; }}
     .badge {{ border: 1px solid rgba(176,118,85,.55); color: var(--copper); background: rgba(176,118,85,.12); padding: 2px 6px; font-size: 10px; }}
     .mode-tabs {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 18px 0; }}
     .mode-tabs a, button {{
@@ -588,6 +768,7 @@ def page_shell(
       transition: transform .18s ease, border-color .18s ease, background .18s ease;
     }}
     .mode-tabs a.active, button:hover {{ border-color: var(--blue); background: rgba(106, 167, 200, .2); transform: translateY(-1px); }}
+    button:disabled {{ cursor: not-allowed; opacity: .42; transform: none; }}
     .workspace {{ padding: 26px 34px 42px; display: grid; gap: 20px; min-width: 0; }}
     .hero {{ display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 12px 0 22px; border-bottom: 1px solid var(--line); }}
     .hero h2 {{ color: var(--paper); font-size: clamp(32px, 5vw, 72px); line-height: 1; margin: 0 0 12px; letter-spacing: 0; }}
@@ -608,6 +789,15 @@ def page_shell(
     .agent-message span {{ color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }}
     .agent-message p {{ margin: 6px 0 0; line-height: 1.65; }}
     .agent-actions {{ max-width: 420px; }}
+    .agent-workload {{ border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 18px 0; display: grid; grid-template-columns: minmax(13rem, .4fr) minmax(0, 1fr); gap: 18px; }}
+    .agent-workload h3 {{ margin: 0; color: var(--paper); }}
+    .agent-workload-grid {{ display: grid; gap: 10px; }}
+    .agent-load-row {{ display: grid; grid-template-columns: minmax(13rem, .7fr) minmax(16rem, .8fr) minmax(0, 1fr); gap: 12px; align-items: start; border-left: 2px solid var(--blue); background: rgba(106,167,200,.06); padding: 12px; }}
+    .agent-load-row h4 {{ margin: 8px 0 4px; color: var(--paper); }}
+    .agent-load-row ol {{ margin: 0; padding-left: 18px; color: var(--read); }}
+    .agent-load-stats {{ display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }}
+    .enabled {{ color: #b9d8c0; border-color: rgba(185,216,192,.44); }}
+    .disabled {{ color: var(--muted); border-color: rgba(167,170,163,.32); background: rgba(167,170,163,.08); }}
     .plan-strip {{ border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 18px 0; display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 22px; }}
     .plan-strip h3 {{ margin: 0 0 8px; color: var(--paper); }}
     .plan-strip p {{ margin: 0; color: var(--muted); line-height: 1.6; }}
@@ -655,11 +845,16 @@ def page_shell(
     .detail-links {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 18px; }}
     .log-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
     .log-grid pre {{ max-height: 260px; white-space: pre-wrap; }}
+    .agent-manager-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }}
+    .agent-table {{ display: grid; gap: 10px; }}
+    .agent-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }}
+    .agent-row strong, .agent-row code, .agent-row small {{ display: block; margin-bottom: 4px; }}
+    .agent-row small {{ color: var(--muted); line-height: 1.45; }}
     @media (max-width: 900px) {{
       .app-shell {{ grid-template-columns: 1fr; }}
       .rail {{ position: static; height: auto; }}
       .workspace {{ padding: 20px; }}
-      .grid, .dashboard-grid, .log-grid, .plan-strip {{ grid-template-columns: 1fr; }}
+      .grid, .dashboard-grid, .log-grid, .plan-strip, .agent-workload, .agent-load-row, .agent-manager-grid, .agent-row {{ grid-template-columns: 1fr; }}
       .agent-header {{ flex-direction: column; }}
       .hero {{ align-items: flex-start; flex-direction: column; }}
       .telemetry {{ justify-items: start; }}
@@ -694,9 +889,11 @@ def page_shell(
     </form>
   </dialog>
   {execution_dialog}
+  {agent_dialog}
   <script>
     window.openNewStudio = () => document.getElementById('new-studio').showModal();
     window.openExecutionDetails = () => document.getElementById('execution-details').showModal();
+    window.openAgentManager = () => document.getElementById('agent-manager').showModal();
   </script>
 </body>
 </html>
@@ -705,6 +902,7 @@ def page_shell(
 
 def render_studio_sidebar(root: Path, current: dict) -> str:
     studios = list_studios(root)
+    agent_dock = render_agent_dock(root, current)
     items = "\n".join(
         f"""
         <a class="studio-link {active_class(item['run_id'], current['run_id'])}" href="/dashboard?studio={quote(item['run_id'])}">
@@ -723,7 +921,114 @@ def render_studio_sidebar(root: Path, current: dict) -> str:
       <div class="sub">artifact pipeline / human gates</div>
       <button type="button" onclick="openNewStudio()">New Studio</button>
       <div class="studio-list">{items or "<p class='muted'>暂无 Studio</p>"}</div>
+      {agent_dock}
     </aside>
+    """
+
+
+def render_agent_dock(root: Path, current: dict) -> str:
+    workflow = read_yaml(root / current["workflow_path"])
+    active = active_agent_entries(current, workflow)
+    active_counts: dict[str, int] = {}
+    for item in active:
+        active_counts[item["agent"]] = active_counts.get(item["agent"], 0) + 1
+
+    rows = []
+    for agent_id, agent in sorted(current.get("agents", {}).items()):
+        active_count = active_counts.get(agent_id, 0)
+        rows.append(
+            f"""
+            <div class="agent-compact">
+              <span>{escape(agent.get("name", agent_id))}</span>
+              <small>{escape(agent.get("status", "unknown"))}{f" / {active_count} active" if active_count else ""}</small>
+            </div>
+            """
+        )
+    return f"""
+    <section class="agent-dock">
+      <div class="rail-heading">
+        <span>Agents</span>
+        <button type="button" onclick="openAgentManager()">Manage</button>
+      </div>
+      <div class="agent-list">{''.join(rows) or "<p class='muted'>暂无挂载 Agent</p>"}</div>
+    </section>
+    """
+
+
+def render_agent_management_dialog(root: Path, state: dict) -> str:
+    studio = quote(state["run_id"])
+    mounted = state.get("agents", {})
+    workflow = read_yaml(root / state["workflow_path"])
+    running_agents = {item["agent"] for item in active_agent_entries(state, workflow)}
+    mounted_rows = "\n".join(
+        render_mounted_agent_row(studio, agent_id, agent, agent_id in running_agents)
+        for agent_id, agent in sorted(mounted.items())
+    )
+    import_rows = "\n".join(
+        render_standard_agent_import(studio, agent_id, item["data"])
+        for agent_id, item in sorted(standard_agent_sources(root).items())
+        if agent_id not in mounted
+    )
+    return f"""
+    <dialog id="agent-manager" class="wide">
+      <h3>Agent Manager</h3>
+      <p class="muted">标准 Agent 来自 <code>configs/agents/*.yaml</code>；导入后会复制为当前 Studio 的独立副本。</p>
+      <section class="agent-manager-grid">
+        <div>
+          <h3>Mounted</h3>
+          <div class="agent-table">{mounted_rows or "<p class='muted'>暂无挂载 Agent</p>"}</div>
+        </div>
+        <div>
+          <h3>Standard Library</h3>
+          <div class="agent-table">{import_rows or "<p class='muted'>标准库 Agent 已全部导入</p>"}</div>
+        </div>
+      </section>
+      <div class="dialog-actions">
+        <button type="button" onclick="document.getElementById('agent-manager').close()">Close</button>
+      </div>
+    </dialog>
+    """
+
+
+def render_mounted_agent_row(studio: str, agent_id: str, agent: dict, running: bool) -> str:
+    enabled = agent.get("status") == "enabled"
+    next_enabled = "false" if enabled else "true"
+    toggle_label = "停用" if enabled else "启用"
+    disabled = "disabled" if running else ""
+    running_copy = " · running" if running else ""
+    return f"""
+    <article class="agent-row">
+      <div>
+        <strong>{escape(agent.get("name", agent_id))}</strong>
+        <code>{escape(agent_id)}</code>
+        <small>{escape(agent.get("status", "unknown"))}{running_copy} · {escape(agent.get("copy", ""))}</small>
+      </div>
+      <form method="post" action="/action/agent/toggle?studio={studio}">
+        <input type="hidden" name="agent_id" value="{escape(agent_id)}" />
+        <input type="hidden" name="enabled" value="{next_enabled}" />
+        <button type="submit" {disabled}>{toggle_label}</button>
+      </form>
+      <form method="post" action="/action/agent/delete?studio={studio}">
+        <input type="hidden" name="agent_id" value="{escape(agent_id)}" />
+        <button type="submit" {disabled}>删除</button>
+      </form>
+    </article>
+    """
+
+
+def render_standard_agent_import(studio: str, agent_id: str, agent: dict) -> str:
+    return f"""
+    <article class="agent-row">
+      <div>
+        <strong>{escape(agent.get("name", agent_id))}</strong>
+        <code>{escape(agent_id)}</code>
+        <small>{escape(agent.get("mission", "")).strip()}</small>
+      </div>
+      <form method="post" action="/action/agent/import?studio={studio}">
+        <input type="hidden" name="agent_id" value="{escape(agent_id)}" />
+        <button type="submit">导入</button>
+      </form>
+    </article>
     """
 
 

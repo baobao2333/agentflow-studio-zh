@@ -198,7 +198,7 @@ def build_codex_prompt(
     cocos_projects: list[Path] | None = None,
 ) -> str:
     cocos_projects = cocos_projects or []
-    agent_config = find_agent_config(root, node.get("agent", ""))
+    agent_config = find_agent_config(root, state, node.get("agent", ""))
     prior_artifacts = collect_prior_artifacts(root, state, node)
     output_lines = "\n".join(
         f"- `{item['path']}`: {item.get('title', item['key'])} (key: {item['key']})"
@@ -253,7 +253,14 @@ def build_codex_prompt(
     ).strip()
 
 
-def find_agent_config(root: Path, agent_id: str) -> dict[str, Any]:
+def find_agent_config(root: Path, state: dict[str, Any], agent_id: str) -> dict[str, Any]:
+    mounted = state.get("agents", {}).get(agent_id, {})
+    copy_path = mounted.get("copy")
+    if copy_path:
+        path = root / copy_path
+        if path.exists():
+            return read_yaml(path)
+
     for path in (root / "configs" / "agents").glob("*.yaml"):
         data = read_yaml(path)
         if data.get("id") == agent_id:
