@@ -14,9 +14,16 @@ class EngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             shutil.copytree(source_root / "configs", root / "configs")
+            workflow_path = root / "configs/workflows/cocos-game-dev.zh.yaml"
+            workflow_path.write_text(
+                workflow_path.read_text(encoding="utf-8").replace(
+                    "adapter: codex_cli", "adapter: mock"
+                ),
+                encoding="utf-8",
+            )
             state_path = create_run(
                 root=root,
-                workflow_path=root / "configs/workflows/cocos-game-dev.zh.yaml",
+                workflow_path=workflow_path,
                 goal="做一个俯视角抢车位小游戏",
                 run_id="test-run",
                 game_name="parking-space-test",

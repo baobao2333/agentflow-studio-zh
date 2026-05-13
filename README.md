@@ -120,6 +120,15 @@ tests/                        最小回归测试
 
 当前版本提供一个确定性的 `mock` adapter，用来验证流程、文件交接、人类介入和可视化看板。它会为不同阶段生成不同结构的示例文档，但这些内容仍是 mock draft，不等同于真实 Agent 推理结果。真实接入 LLM 时，建议保留同样的状态结构和回执格式，只替换 adapter。
 
+默认 Cocos workflow 已使用 `codex_cli` adapter，要求本机已登录 Codex CLI：
+
+```powershell
+codex --version
+codex login
+```
+
+如果只想离线测试流程壳，可以把 workflow 里的 `adapter: codex_cli` 临时改成 `adapter: mock`。
+
 ## 参考资料
 
 - LangGraph 官方文档说明它专注于长运行、有状态的 Agent 编排，并支持 durable execution、human-in-the-loop、persistence 等能力：https://docs.langchain.com/oss/python/langgraph/overview

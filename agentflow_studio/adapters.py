@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+import textwrap
+import time
 from pathlib import Path
 from typing import Any
 
+from .config import read_yaml
 from .models import format_template, now_iso
 
 
@@ -32,6 +38,369 @@ def run_mock_agent(
         summary=node.get("summary", node.get("objective", "")),
         artifacts=artifacts,
     )
+
+
+def run_codex_cli_agent(
+    *,
+    root: Path,
+    state: dict[str, Any],
+    node: dict[str, Any],
+) -> AdapterResult:
+    codex = shutil.which("codex")
+    if not codex:
+        raise RuntimeError("Codex CLI not found in PATH.")
+
+    artifacts: dict[str, str] = {}
+    outputs = []
+    for output in node.get("outputs", []):
+        relative_path = format_template(output["path"], state)
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        outputs.append({**output, "path": relative_path})
+        artifacts[output["key"]] = relative_path
+
+    run_dir = root / "runs" / state["run_id"] / "codex"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = run_dir / f"{node['id']}.prompt.md"
+    stdout_path = run_dir / f"{node['id']}.stdout.log"
+    stderr_path = run_dir / f"{node['id']}.stderr.log"
+    last_message_path = run_dir / f"{node['id']}.last.md"
+
+    cocos_projects = resolve_cocos_projects(root, state, node)
+    prompt = build_codex_prompt(
+        root=root,
+        state=state,
+        node=node,
+        outputs=outputs,
+        cocos_projects=cocos_projects,
+    )
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    command = [
+        codex,
+        "exec",
+        "--cd",
+        str(root),
+        "--sandbox",
+        "workspace-write",
+    ]
+    for project in cocos_projects:
+        if project.resolve() != root.resolve():
+            command.extend(["--add-dir", str(project)])
+    command.extend(
+        [
+            "--output-last-message",
+            str(last_message_path),
+            "-",
+        ]
+    )
+
+    append_runtime_event(
+        root,
+        state,
+        "node_progress",
+        {
+            "node": node["id"],
+            "message": "Codex CLI process started.",
+            "logs": {
+                "stdout": str(stdout_path.relative_to(root)),
+                "stderr": str(stderr_path.relative_to(root)),
+                "last_message": str(last_message_path.relative_to(root)),
+            },
+        },
+    )
+    timeout_seconds = int(node.get("timeout_seconds", 1800))
+    start = time.monotonic()
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    first_communicate = True
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout_seconds:
+            process.kill()
+            stdout, stderr = process.communicate()
+            stdout_path.write_text(stdout, encoding="utf-8")
+            stderr_path.write_text(stderr, encoding="utf-8")
+            append_runtime_event(
+                root,
+                state,
+                "node_progress",
+                {"node": node["id"], "message": f"Codex CLI timed out after {timeout_seconds}s."},
+            )
+            raise TimeoutError(f"Codex CLI timed out for node {node['id']} after {timeout_seconds}s.")
+
+        try:
+            stdout, stderr = process.communicate(
+                input=prompt if first_communicate else None,
+                timeout=min(15, max(1, timeout_seconds - int(elapsed))),
+            )
+            break
+        except subprocess.TimeoutExpired:
+            first_communicate = False
+            append_runtime_event(
+                root,
+                state,
+                "node_progress",
+                {
+                    "node": node["id"],
+                    "message": f"Codex CLI still running after {int(time.monotonic() - start)}s.",
+                },
+            )
+
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
+    append_runtime_event(
+        root,
+        state,
+        "node_progress",
+        {"node": node["id"], "message": f"Codex CLI finished in {int(time.monotonic() - start)}s."},
+    )
+
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Codex CLI failed for node {node['id']} with exit code {process.returncode}. "
+            f"See {stderr_path.relative_to(root)}"
+        )
+
+    missing = [item["path"] for item in outputs if not (root / item["path"]).exists()]
+    if missing:
+        raise RuntimeError(
+            f"Codex CLI completed but did not create expected outputs for node {node['id']}: "
+            + ", ".join(missing)
+        )
+
+    return AdapterResult(
+        status=infer_result_status(root, node, outputs),
+        summary=read_summary(last_message_path),
+        artifacts=artifacts,
+        logs={
+            "prompt": str(prompt_path.relative_to(root)),
+            "stdout": str(stdout_path.relative_to(root)),
+            "stderr": str(stderr_path.relative_to(root)),
+            "last_message": str(last_message_path.relative_to(root)),
+        },
+    )
+
+
+def build_codex_prompt(
+    *,
+    root: Path,
+    state: dict[str, Any],
+    node: dict[str, Any],
+    outputs: list[dict[str, Any]],
+    cocos_projects: list[Path] | None = None,
+) -> str:
+    cocos_projects = cocos_projects or []
+    agent_config = find_agent_config(root, node.get("agent", ""))
+    prior_artifacts = collect_prior_artifacts(root, state, node)
+    output_lines = "\n".join(
+        f"- `{item['path']}`: {item.get('title', item['key'])} (key: {item['key']})"
+        for item in outputs
+    )
+    checklist = "\n".join(f"- {item}" for item in node.get("checklist", []))
+    agent_yaml = json.dumps(agent_config, ensure_ascii=False, indent=2)
+    prior_text = "\n\n".join(prior_artifacts) or "无。"
+    cocos_environment = render_cocos_environment(root, cocos_projects)
+    execution_rules = build_execution_rules(node, cocos_projects)
+
+    return textwrap.dedent(
+        f"""
+        你是 AgentFlow Studio 正在调用的真实 Codex CLI agent。请按当前节点要求直接写文件，不要只给建议。
+
+        # Agent 配置
+
+        ```json
+        {agent_yaml}
+        ```
+
+        # 当前 Run
+
+        - run_id: {state["run_id"]}
+        - game_name: {state["game_name"]}
+        - 用户目标: {state["goal"]}
+        - 当前节点: {node["id"]} / {node.get("title", "")}
+        - 节点目标: {node.get("objective", "")}
+
+        # 本节点必须产出的文件
+
+        {output_lines}
+
+        # 节点检查标准
+
+        {checklist}
+
+        # 已有上游产物
+
+        {prior_text}
+
+        # 检测到的 Cocos 环境
+
+        {cocos_environment}
+
+        # 执行规则
+
+        {execution_rules}
+
+        完成后最终回复只写：已生成的文件列表和一句摘要。
+        """
+    ).strip()
+
+
+def find_agent_config(root: Path, agent_id: str) -> dict[str, Any]:
+    for path in (root / "configs" / "agents").glob("*.yaml"):
+        data = read_yaml(path)
+        if data.get("id") == agent_id:
+            return data
+    return {"id": agent_id}
+
+
+def collect_prior_artifacts(root: Path, state: dict[str, Any], node: dict[str, Any]) -> list[str]:
+    artifacts = []
+    for key, relative_path in state.get("artifacts", {}).items():
+        if node["id"] == "cocos_implementation" and key in {"implementation_report", "validation_report"}:
+            continue
+        path = root / relative_path
+        text = path.read_text(encoding="utf-8")
+        if len(text) > 6000:
+            text = text[:6000] + "\n\n[内容过长，已截断]"
+        artifacts.append(f"## {key}: `{relative_path}`\n\n{text}")
+    return artifacts
+
+
+def read_summary(path: Path) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8").strip()
+    return text[:1000]
+
+
+def append_runtime_event(
+    root: Path,
+    state: dict[str, Any],
+    event: str,
+    payload: dict[str, Any],
+) -> None:
+    record = {
+        "time": now_iso(),
+        "event": event,
+        "phase": state.get("phase"),
+        "payload": payload,
+    }
+    timeline_path = root / "runs" / state["run_id"] / "timeline.jsonl"
+    timeline_path.parent.mkdir(parents=True, exist_ok=True)
+    with timeline_path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def resolve_cocos_projects(root: Path, state: dict[str, Any], node: dict[str, Any]) -> list[Path]:
+    if node.get("agent") != "cocos-implementation-agent":
+        return []
+
+    configured = state.get("cocos_project")
+    project = (root / configured).resolve() if configured else (root.parent / "game" / state["game_name"]).resolve()
+    if node["id"] in {"cocos_implementation", "build_validation"}:
+        project.mkdir(parents=True, exist_ok=True)
+    return [project]
+
+
+def is_cocos_project(path: Path) -> bool:
+    package_path = path / "package.json"
+    if not package_path.exists():
+        return False
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        package = {}
+    return bool(package.get("creator")) or (
+        (path / "assets").is_dir()
+        and ((path / "settings").is_dir() or (path / "profiles").is_dir())
+    )
+
+
+def infer_result_status(root: Path, node: dict[str, Any], outputs: list[dict[str, Any]]) -> str:
+    text = "\n".join(read_output_text(root, item["path"]) for item in outputs)
+
+    if node["id"] == "cocos_implementation":
+        if has_any(text, ["本次未落地 Cocos 源码", "只产出实现报告", "待源码写入", "无法创建 Cocos", "未写入 Cocos"]):
+            return "needs_fix"
+
+    if node["id"] == "build_validation":
+        if has_any(text, ["是否返回 Needs Gameplay Revision | 是", "偏差来自规则缺口", "规则缺口 | 是"]):
+            return "needs_revision"
+        if has_any(text, ["玩法交接对齐 | 不通过", "偏差属于实现问题", "| 不通过 |", "P0 偏差", "IMP-"]):
+            return "needs_fix"
+
+    return "done"
+
+
+def read_output_text(root: Path, relative_path: str) -> str:
+    path = root / relative_path
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def has_any(text: str, markers: list[str]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def render_cocos_environment(root: Path, projects: list[Path]) -> str:
+    if not projects:
+        return "当前节点不需要 Cocos Creator 项目。"
+    lines = []
+    for project in projects:
+        try:
+            display = project.relative_to(root)
+        except ValueError:
+            display = project
+        lines.append(f"- `{display}`")
+    return "\n".join(lines) + "\n\n只能把上面的目录当作本 run 的 Cocos 目标项目；不要读取、复用或改写其他兄弟 Cocos 项目，除非用户显式配置。"
+
+
+def build_execution_rules(node: dict[str, Any], cocos_projects: list[Path]) -> str:
+    rules = [
+        "- 必须用简体中文写面向用户审阅的 Markdown。",
+        "- 必须创建或覆盖“本节点必须产出的文件”列表里的每个文件。",
+        "- 不要写 mock、placeholder、示例占位字样。请根据用户目标和上游产物做真实设计、实现或验证。",
+        "- 如果信息不足，使用“推荐默认值 + 需确认”推进，不要空等用户。",
+        "- 表格要可执行，避免空泛描述。",
+        "- 文件结尾附上“运行信息”表，包含 Run ID、Game Name、Node。",
+    ]
+
+    if node["id"] == "cocos_implementation":
+        rules.extend(
+            [
+                "- 这是实现节点：必须先检查检测到的 Cocos 项目，并在该项目内完成玩法代码、场景、UI 或资源绑定落盘。",
+                "- 如果目标 Cocos 项目为空或不是 Creator 项目，必须在该目录初始化或补齐首版可运行项目结构；不要改用其他旧项目。",
+                "- 不要因为本节点有 implementation_report 输出就只写报告；报告必须汇总实际源码改动、项目路径和验证方式。",
+                "- 允许修改检测到的 Cocos 项目内的 `assets/**`、`settings/**`、`profiles/**`、`package.json`、`tsconfig.json`、`progress.md`，以及本节点要求的报告文件。",
+                "- 不要修改 AgentFlow Studio 的源码、配置、README、测试或上游玩法文档，除非它们就是本节点要求的输出文件。",
+                "- 如果无法完成源码落盘，必须在报告中写明阻塞，并让本节点结果保持 needs_fix；不要声称实现完成。",
+            ]
+        )
+    elif node["id"] == "build_validation":
+        rules.extend(
+            [
+                "- 这是验证节点：必须针对检测到的 Cocos 项目运行可用的构建、预览或冒烟检查，并把命令、结果和证据写入验证报告。",
+                "- 允许在检测到的 Cocos 项目内写入验证产物或修复明显的构建阻塞；不要改玩法规则。",
+                "- 如果无法运行 Cocos 构建或预览，必须写清检测到的项目路径、尝试过的命令和失败原因。",
+                "- 如果 P0 验收、玩法交接对齐或核心源码落地不通过，报告必须明确写出 needs_fix，不要把节点视为完成。",
+            ]
+        )
+    else:
+        rules.append("- 不要修改本节点输出以外的项目代码、配置、README、测试或其他文件。")
+
+    if cocos_projects and node.get("agent") == "cocos-implementation-agent":
+        rules.append("- 检测到的 Cocos 项目已作为 Codex CLI 额外可写目录传入，可以直接编辑其中源码。")
+
+    return "\n".join(rules)
 
 
 def render_artifact(
@@ -421,5 +790,6 @@ def run_info(state: dict[str, Any], node: dict[str, Any]) -> str:
 
 
 ADAPTERS = {
+    "codex_cli": run_codex_cli_agent,
     "mock": run_mock_agent,
 }

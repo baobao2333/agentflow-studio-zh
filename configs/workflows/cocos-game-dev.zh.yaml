@@ -11,7 +11,7 @@ nodes:
     kind: agent
     title: 玩法意图澄清
     agent: gameplay-design-agent
-    adapter: mock
+    adapter: codex_cli
     objective: 澄清玩家角色、目标、体验承诺、核心张力和关键未知项。
     checklist:
       - 玩家目标明确。
@@ -27,7 +27,7 @@ nodes:
     kind: agent
     title: 核心循环与 MVP 边界
     agent: gameplay-design-agent
-    adapter: mock
+    adapter: codex_cli
     objective: 定义第一版可玩的核心循环、局内阶段、MVP 范围和非目标。
     checklist:
       - 核心循环包含行动、系统反馈、状态变化和下一选择。
@@ -43,7 +43,7 @@ nodes:
     kind: agent
     title: 玩法规则建模
     agent: gameplay-design-agent
-    adapter: mock
+    adapter: codex_cli
     objective: 把玩法循环转成实体、状态、输入、条件、结果、胜负和异常规则。
     checklist:
       - 每个核心动作都有触发、条件、结果和反馈。
@@ -59,7 +59,7 @@ nodes:
     kind: agent
     title: 流程与验收
     agent: gameplay-design-agent
-    adapter: mock
+    adapter: codex_cli
     objective: 生成玩家流程、系统判断流、验收标准和 Cocos 实现交接物。
     checklist:
       - P0 验收用例可观察。
@@ -86,33 +86,43 @@ nodes:
     kind: agent
     title: Cocos 首版实现
     agent: cocos-implementation-agent
-    adapter: mock
+    adapter: codex_cli
     objective: 根据玩法交接物实现第一版 Cocos 可玩项目。
     checklist:
       - 实现不改变玩法规则。
+      - 检测并复用已有 Cocos Creator 项目。
       - 项目源码改动集中在可维护目录。
+      - 实现报告列出实际落盘的源码、场景、资源或配置文件。
       - 若发现 Rule gap，返回玩法修订。
     outputs:
       - key: implementation_report
         title: Cocos Implementation Report
         path: runs/{run_id}/implementation-report.md
-    next: build_validation
+    next_on:
+      done: build_validation
+      needs_fix: cocos_implementation
+      default: build_validation
 
   - id: build_validation
     kind: agent
     title: 构建与验证
     agent: cocos-implementation-agent
-    adapter: mock
+    adapter: codex_cli
     objective: 构建或预览项目，验证交接物里的第一批验收项。
     checklist:
       - 有构建或冒烟结果。
+      - 验证报告列出 Cocos 项目路径和执行过的命令。
       - 验证结果与玩法交接物对齐。
       - 偏差被记录为实现问题或 Rule gap。
     outputs:
       - key: validation_report
         title: Validation Report
         path: runs/{run_id}/validation-report.md
-    next: human_playtest_review
+    next_on:
+      done: human_playtest_review
+      needs_fix: cocos_implementation
+      needs_revision: gameplay_rules
+      default: human_playtest_review
 
   - id: human_playtest_review
     kind: human_gate
@@ -122,4 +132,3 @@ nodes:
       approve: __end__
       fix: cocos_implementation
       revise_rules: gameplay_rules
-
