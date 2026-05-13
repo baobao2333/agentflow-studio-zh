@@ -1,0 +1,125 @@
+id: cocos-game-dev
+name: Cocos 游戏开发长流程
+version: 0.1.0
+start: gameplay_intake
+coordinator:
+  config: configs/coordinators/cocos-game-dev.zh.yaml
+defaults:
+  max_iterations: 3
+nodes:
+  - id: gameplay_intake
+    kind: agent
+    title: 玩法意图澄清
+    agent: gameplay-design-agent
+    adapter: mock
+    objective: 澄清玩家角色、目标、体验承诺、核心张力和关键未知项。
+    checklist:
+      - 玩家目标明确。
+      - 核心张力能解释为什么值得玩。
+      - 未知项被标记为 Fact、Assumption 或 Decision needed。
+    outputs:
+      - key: idea_intake
+        title: 00 Idea Intake
+        path: docs/gameplay-workspace/{game_name}/00-idea-intake.md
+    next: loop_boundary
+
+  - id: loop_boundary
+    kind: agent
+    title: 核心循环与 MVP 边界
+    agent: gameplay-design-agent
+    adapter: mock
+    objective: 定义第一版可玩的核心循环、局内阶段、MVP 范围和非目标。
+    checklist:
+      - 核心循环包含行动、系统反馈、状态变化和下一选择。
+      - MVP 范围足够小。
+      - 非目标不会被带入实现。
+    outputs:
+      - key: loop_boundary
+        title: 01 Loop Boundary
+        path: docs/gameplay-workspace/{game_name}/01-loop-boundary.md
+    next: gameplay_rules
+
+  - id: gameplay_rules
+    kind: agent
+    title: 玩法规则建模
+    agent: gameplay-design-agent
+    adapter: mock
+    objective: 把玩法循环转成实体、状态、输入、条件、结果、胜负和异常规则。
+    checklist:
+      - 每个核心动作都有触发、条件、结果和反馈。
+      - 胜利、失败、重开、非法输入有规则。
+      - 没有阻塞实现的 Rule gap。
+    outputs:
+      - key: gameplay_rules
+        title: 02 Gameplay Rules
+        path: docs/gameplay-workspace/{game_name}/02-rules.md
+    next: flows_acceptance
+
+  - id: flows_acceptance
+    kind: agent
+    title: 流程与验收
+    agent: gameplay-design-agent
+    adapter: mock
+    objective: 生成玩家流程、系统判断流、验收标准和 Cocos 实现交接物。
+    checklist:
+      - P0 验收用例可观察。
+      - HUD 与反馈需求清楚。
+      - 交接物可被 Cocos 实现 Agent 消费。
+    outputs:
+      - key: flows_acceptance
+        title: 03 Flows Acceptance
+        path: docs/gameplay-workspace/{game_name}/03-flows-acceptance.md
+      - key: gameplay_handoff
+        title: 04 Gameplay Rules Handoff
+        path: docs/gameplay-workspace/{game_name}/04-gameplay-rules-handoff.md
+    next: human_rules_review
+
+  - id: human_rules_review
+    kind: human_gate
+    title: 人类审阅玩法规则
+    prompt: 请审阅玩法规则交接物。批准后进入 Cocos 实现；如需要改玩法，请选择 revise。
+    next_on:
+      approve: cocos_implementation
+      revise: gameplay_rules
+
+  - id: cocos_implementation
+    kind: agent
+    title: Cocos 首版实现
+    agent: cocos-implementation-agent
+    adapter: mock
+    objective: 根据玩法交接物实现第一版 Cocos 可玩项目。
+    checklist:
+      - 实现不改变玩法规则。
+      - 项目源码改动集中在可维护目录。
+      - 若发现 Rule gap，返回玩法修订。
+    outputs:
+      - key: implementation_report
+        title: Cocos Implementation Report
+        path: runs/{run_id}/implementation-report.md
+    next: build_validation
+
+  - id: build_validation
+    kind: agent
+    title: 构建与验证
+    agent: cocos-implementation-agent
+    adapter: mock
+    objective: 构建或预览项目，验证交接物里的第一批验收项。
+    checklist:
+      - 有构建或冒烟结果。
+      - 验证结果与玩法交接物对齐。
+      - 偏差被记录为实现问题或 Rule gap。
+    outputs:
+      - key: validation_report
+        title: Validation Report
+        path: runs/{run_id}/validation-report.md
+    next: human_playtest_review
+
+  - id: human_playtest_review
+    kind: human_gate
+    title: 人类试玩审阅
+    prompt: 请根据验证报告或试玩结果决定是否完成、继续修实现，或回到玩法规则。
+    next_on:
+      approve: __end__
+      fix: cocos_implementation
+      revise_rules: gameplay_rules
+

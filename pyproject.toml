@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentflow-studio-zh"
+version = "0.1.0"
+description = "Configurable long-running multi-agent workflow studio with artifact handoffs and human gates."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "baobao2333" }
+]
+dependencies = [
+  "PyYAML>=6.0.1"
+]
+
+[project.scripts]
+agentflow = "agentflow_studio.cli:main"
+
+[tool.setuptools]
+packages = ["agentflow_studio"]
+

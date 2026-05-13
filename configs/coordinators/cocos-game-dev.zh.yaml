@@ -1,0 +1,29 @@
+id: cocos-game-dev-coordinator
+name: Cocos 游戏开发协调器
+language: zh-CN
+description: >
+  协调玩法设计 Agent 与 Cocos 实现 Agent，确保玩法规则先被文档化，
+  再进入引擎实现、构建和验证。
+policies:
+  max_blocking_questions_per_gate: 1
+  require_artifact_handoff: true
+  allow_implementation_to_invent_rules: false
+  require_validation_before_done: true
+handoff_gates:
+  gameplay_to_cocos:
+    required_fields:
+      - Player goal
+      - Core loop
+      - Inputs
+      - Entities
+      - States
+      - Rules to implement first
+      - Win/loss/result behavior
+      - Required HUD and feedback
+      - First validation checklist
+  implementation_to_design:
+    trigger_labels:
+      - Rule gap
+      - Needs Gameplay Revision
+      - Acceptance not observable
+
