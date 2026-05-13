@@ -13,9 +13,11 @@ def render_dashboard(*, root: Path, state_path: Path) -> Path:
     mermaid = workflow_to_mermaid(workflow, state)
     history_rows = "\n".join(render_history_row(item) for item in state["history"])
     artifacts = "\n".join(
-        f"<li><code>{escape(key)}</code>: <a href='../../{escape(path)}'>{escape(path)}</a></li>"
+        f"<li><code>{escape(key)}</code>: <a href='/artifact/{escape(key)}'>{escape(path)}</a> "
+        f"<a class='muted' href='/{escape(path)}'>raw</a></li>"
         for key, path in state.get("artifacts", {}).items()
     )
+    review_link = "<a href='/review'>进入审阅页</a>"
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -33,6 +35,8 @@ def render_dashboard(*, root: Path, state_path: Path) -> Path:
     section {{ background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; }}
     h1, h2 {{ margin: 0 0 12px; }}
     code {{ background: #f1f5f9; padding: 2px 5px; border-radius: 4px; }}
+    a {{ color: #2563eb; }}
+    .muted {{ color: #6b7280; font-size: 13px; margin-left: 6px; }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }}
     .status {{ display: inline-block; padding: 4px 10px; border-radius: 999px; background: #dbeafe; color: #1e40af; }}
@@ -49,6 +53,7 @@ def render_dashboard(*, root: Path, state_path: Path) -> Path:
     <section>
       <h2>目标</h2>
       <p>{escape(state["goal"])}</p>
+      <p>{review_link}</p>
     </section>
     <section>
       <h2>工作流图</h2>
@@ -123,4 +128,3 @@ def render_history_row(item: dict[str, Any]) -> str:
         f"<td><code>{escape(payload)}</code></td>"
         "</tr>"
     )
-

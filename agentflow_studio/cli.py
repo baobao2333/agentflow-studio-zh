@@ -6,6 +6,7 @@ from pathlib import Path
 from .config import read_json
 from .engine import create_run, resume_run, step_run
 from .render import render_dashboard
+from .web import serve
 
 
 def main() -> None:
@@ -32,6 +33,11 @@ def main() -> None:
 
     render_parser = subparsers.add_parser("render", help="Render HTML dashboard.")
     render_parser.add_argument("state")
+
+    serve_parser = subparsers.add_parser("serve", help="Serve review UI for a run.")
+    serve_parser.add_argument("state")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8765)
 
     args = parser.parse_args()
     root = Path(args.root).resolve()
@@ -79,6 +85,11 @@ def main() -> None:
         print(f"看板: {dashboard}")
         return
 
+    if args.command == "serve":
+        render_dashboard(root=root, state_path=state_path)
+        serve(root=root, state_path=state_path, host=args.host, port=args.port)
+        return
+
 
 def print_status(state: dict) -> None:
     print(f"Run: {state['run_id']}")
@@ -92,4 +103,3 @@ def print_status(state: dict) -> None:
 
 if __name__ == "__main__":
     main()
-

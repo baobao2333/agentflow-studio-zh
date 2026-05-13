@@ -70,6 +70,20 @@ agentflow step runs/demo/state.json
 agentflow step runs/demo/state.json
 ```
 
+也可以直接启动网页审阅服务，在浏览器里阅读产物并点击 approve / revise：
+
+```powershell
+agentflow serve runs/demo/state.json --port 8765
+```
+
+打开：
+
+```text
+http://127.0.0.1:8765/review
+```
+
+`serve` 会把 Markdown 按 UTF-8 渲染成网页，避免浏览器直接打开 `.md` 时猜错编码。
+
 如果试玩后需要继续修实现：
 
 ```powershell
@@ -116,4 +130,3 @@ tests/                        最小回归测试
 ## 协议
 
 MIT License。允许使用、复制、修改、分发和商业使用。
-

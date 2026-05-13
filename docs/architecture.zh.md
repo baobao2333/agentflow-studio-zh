@@ -68,6 +68,22 @@ runs/{run_id}/dashboard.html
 
 默认 Mermaid 从 CDN 加载。离线部署时可以把 Mermaid 文件内置到模板里。
 
+## 网页审阅
+
+除了生成静态 dashboard，还可以启动审阅服务：
+
+```powershell
+agentflow serve runs/demo/state.json --port 8765
+```
+
+打开 `http://127.0.0.1:8765/review` 后，可以：
+
+- 在网页中阅读 Markdown 产物。
+- 在人工节点直接点击 approve、revise、fix 等决策。
+- 继续推进 workflow，不需要回到本地终端目录。
+
+服务会对 Markdown 使用 UTF-8 并渲染为 HTML，避免浏览器直接打开 `.md` 时出现乱码。
+
 ## 迁移到其他产品流程
 
 迁移时通常只需要改三类 YAML：
@@ -90,4 +106,3 @@ idea_intake
 ```
 
 运行内核不需要改。
-
