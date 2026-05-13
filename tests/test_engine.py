@@ -37,6 +37,14 @@ class EngineTests(unittest.TestCase):
             state = step_run(root=root, state_path=state_path)
             self.assertEqual(state["status"], "paused")
             self.assertIn("gameplay_handoff", state["artifacts"])
+            idea = (root / state["artifacts"]["idea_intake"]).read_text(encoding="utf-8")
+            rules = (root / state["artifacts"]["gameplay_rules"]).read_text(encoding="utf-8")
+            handoff = (root / state["artifacts"]["gameplay_handoff"]).read_text(encoding="utf-8")
+            self.assertIn("玩家承诺", idea)
+            self.assertIn("规则实体", rules)
+            self.assertIn("必须实现的玩法契约", handoff)
+            self.assertNotEqual(idea, rules)
+            self.assertNotEqual(rules, handoff)
 
             state = resume_run(
                 root=root,
@@ -49,4 +57,3 @@ class EngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
