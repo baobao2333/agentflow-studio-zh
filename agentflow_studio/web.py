@@ -413,7 +413,21 @@ def render_artifact_page(root: Path, state_path: Path, key: str) -> str:
 def render_artifact_body(root: Path, state: dict, key: str) -> str:
     relative = state["artifacts"][key]
     target = root / relative
+    if target.suffix.lower() in {".html", ".htm"}:
+        return render_html_document(relative)
     return render_markdown_document(relative, target.read_text(encoding="utf-8"))
+
+
+def render_html_document(relative: str) -> str:
+    raw_path = quote(relative.replace("\\", "/"))
+    return f"""
+    <div class="doc-title">
+      <span>HTML Preview</span>
+      <code>{escape(relative)}</code>
+      <a class="muted" href="/raw/{raw_path}" target="_blank" rel="noopener">open raw</a>
+    </div>
+    <iframe class="html-preview" src="/raw/{raw_path}" sandbox=""></iframe>
+    """
 
 
 def render_markdown_document(title: str, markdown: str) -> str:
@@ -831,9 +845,13 @@ def page_shell(
       overflow: auto;
       color: var(--read);
     }}
+    .document:has(.html-preview) {{
+      max-width: none;
+    }}
     .document h1, .document h2, .document h3 {{ color: var(--paper); }}
     .document h1 {{ margin-top: 0; font-size: 34px; }}
     .doc-title {{ display: flex; gap: 8px; align-items: center; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 16px; }}
+    .html-preview {{ width: 100%; min-height: 78vh; border: 1px solid var(--line); background: #fff; }}
     table {{ width: 100%; border-collapse: collapse; color: var(--read); font-size: 13px; }}
     td, th {{ border-bottom: 1px solid var(--line); padding: 8px; text-align: left; vertical-align: top; }}
     blockquote {{ border-left: 2px solid var(--copper); margin-left: 0; padding: 8px 14px; background: rgba(176, 118, 85, .08); color: var(--paper); }}
