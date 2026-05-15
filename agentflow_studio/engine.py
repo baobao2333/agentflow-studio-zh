@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import shutil
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +61,13 @@ def workflow_requires_cocos(workflow: dict[str, Any]) -> bool:
 
 
 def step_run(*, root: Path, state_path: Path) -> dict[str, Any]:
+    with run_lock(state_path) as acquired:
+        if not acquired:
+            return read_json(state_path)
+        return _step_run_locked(root=root, state_path=state_path)
+
+
+def _step_run_locked(*, root: Path, state_path: Path) -> dict[str, Any]:
     state = read_json(state_path)
     if state["status"] in {"paused", "done", "working", "failed"}:
         return state
@@ -140,6 +150,39 @@ def step_run(*, root: Path, state_path: Path) -> dict[str, Any]:
     move_to_next(state, next_node)
     write_json(state_path, state)
     return state
+
+
+@contextmanager
+def run_lock(state_path: Path):
+    lock_path = state_path.with_name(f"{state_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = False
+    fd: int | None = None
+    try:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"pid={os.getpid()}\ntime={now_iso()}\n".encode("utf-8"))
+            acquired = True
+        except FileExistsError:
+            if lock_is_stale(lock_path):
+                lock_path.unlink(missing_ok=True)
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"pid={os.getpid()}\ntime={now_iso()}\n".encode("utf-8"))
+                acquired = True
+        yield acquired
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if acquired:
+            lock_path.unlink(missing_ok=True)
+
+
+def lock_is_stale(lock_path: Path, *, max_age_seconds: int = 7200) -> bool:
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    return age > max_age_seconds
 
 
 def resume_run(

@@ -96,6 +96,31 @@ class EngineTests(unittest.TestCase):
             state = step_run(root=root, state_path=state_path)
             self.assertEqual(state["status"], "paused")
 
+    def test_step_run_returns_current_state_when_locked(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            shutil.copytree(source_root / "configs", root / "configs")
+            workflow_path = root / "configs/workflows/prd-generation.zh.yaml"
+            state_path = create_run(
+                root=root,
+                workflow_path=workflow_path,
+                goal="生成一个交付级 PRD",
+                run_id="locked-run",
+                artifact_namespace="locked-prd",
+            )
+            lock_path = state_path.with_name(f"{state_path.name}.lock")
+            lock_path.write_text("held by another worker", encoding="utf-8")
+
+            state = step_run(root=root, state_path=state_path)
+
+            self.assertEqual(state["phase"], "intake_boundary")
+            self.assertEqual(state["status"], "running")
+            self.assertFalse((root / "docs").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
