@@ -15,19 +15,22 @@ def create_run(
     workflow_path: Path,
     goal: str,
     run_id: str,
+    artifact_namespace: str | None = None,
     game_name: str | None = None,
 ) -> Path:
     workflow = read_yaml(workflow_path)
     first_node = workflow["start"]
-    resolved_game_name = slugify(game_name or goal)
+    resolved_namespace = slugify(artifact_namespace or game_name or goal)
     state_path = root / "runs" / run_id / "state.json"
     state = {
         "run_id": run_id,
         "goal": goal,
-        "game_name": resolved_game_name,
+        "artifact_namespace": resolved_namespace,
+        "feature_name": resolved_namespace,
+        # Backward-compatible alias for existing game workflows and templates.
+        "game_name": resolved_namespace,
         "workflow_path": str(workflow_path.relative_to(root)),
         "workflow_id": workflow["id"],
-        "cocos_project": str((root.parent / "game" / resolved_game_name).resolve()),
         "phase": first_node,
         "status": "running",
         "iteration": 0,
@@ -38,11 +41,20 @@ def create_run(
         "history": [],
         "agents": {},
     }
+    if workflow_requires_cocos(workflow):
+        state["cocos_project"] = str((root.parent / "game" / resolved_namespace).resolve())
     mount_workflow_agents(root, state, workflow)
     append_history(state, "run_created", {"node": first_node})
     write_json(state_path, state)
     append_timeline(root, state, "run_created", {"node": first_node})
     return state_path
+
+
+def workflow_requires_cocos(workflow: dict[str, Any]) -> bool:
+    workflow_text = f"{workflow.get('id', '')} {workflow.get('name', '')}".lower()
+    if "cocos" in workflow_text:
+        return True
+    return any(node.get("agent") == "cocos-implementation-agent" for node in workflow.get("nodes", []))
 
 
 def step_run(*, root: Path, state_path: Path) -> dict[str, Any]:

@@ -30,7 +30,7 @@ def run_mock_agent(
         relative_path = format_template(output["path"], state)
         path = root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_artifact(state, node, output), encoding="utf-8")
+        path.write_text(render_artifact_for_path(state, node, output, path), encoding="utf-8")
         artifacts[key] = relative_path
 
     return AdapterResult(
@@ -38,6 +38,58 @@ def run_mock_agent(
         summary=node.get("summary", node.get("objective", "")),
         artifacts=artifacts,
     )
+
+
+def render_artifact_for_path(
+    state: dict[str, Any],
+    node: dict[str, Any],
+    output: dict[str, Any],
+    path: Path,
+) -> str:
+    markdown = render_artifact(state, node, output)
+    if path.suffix.lower() in {".html", ".htm"}:
+        return render_mock_html(state, node, output, markdown)
+    return markdown
+
+
+def render_mock_html(
+    state: dict[str, Any],
+    node: dict[str, Any],
+    output: dict[str, Any],
+    markdown: str,
+) -> str:
+    from html import escape
+
+    title = output.get("title", node.get("title", node["id"]))
+    subject = state.get("artifact_namespace") or state.get("feature_name") or state.get("game_name", "")
+    body = escape(markdown)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(title)} - {escape(state["run_id"])}</title>
+  <style>
+    body {{ margin: 0; background: #f7f8fa; color: #15191f; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; line-height: 1.55; }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 32px 20px 64px; }}
+    header {{ border-bottom: 1px solid #d8dee6; margin-bottom: 22px; padding-bottom: 18px; }}
+    .kicker {{ color: #667085; font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }}
+    h1 {{ margin: 8px 0; font-size: 36px; line-height: 1.12; }}
+    pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #fff; border: 1px solid #d8dee6; border-radius: 8px; padding: 18px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="kicker">Mock HTML Artifact</div>
+      <h1>{escape(title)}</h1>
+      <p>Run <code>{escape(state["run_id"])}</code> · Subject <code>{escape(subject)}</code> · Node <code>{escape(node["id"])}</code></p>
+    </header>
+    <pre>{body}</pre>
+  </main>
+</body>
+</html>
+"""
 
 
 def run_codex_cli_agent(
@@ -223,7 +275,7 @@ def build_codex_prompt(
         # 当前 Run
 
         - run_id: {state["run_id"]}
-        - game_name: {state["game_name"]}
+        - artifact_namespace: {state.get("artifact_namespace") or state.get("game_name", "")}
         - 用户目标: {state["goal"]}
         - 当前节点: {node["id"]} / {node.get("title", "")}
         - 节点目标: {node.get("objective", "")}
@@ -311,7 +363,8 @@ def resolve_cocos_projects(root: Path, state: dict[str, Any], node: dict[str, An
         return []
 
     configured = state.get("cocos_project")
-    project = (root / configured).resolve() if configured else (root.parent / "game" / state["game_name"]).resolve()
+    subject = state.get("artifact_namespace") or state.get("game_name", "game")
+    project = (root / configured).resolve() if configured else (root.parent / "game" / subject).resolve()
     if node["id"] in {"cocos_implementation", "build_validation"}:
         project.mkdir(parents=True, exist_ok=True)
     return [project]
@@ -439,6 +492,7 @@ def render_generic_artifact(
     output: dict[str, Any],
 ) -> str:
     title = output.get("title", node.get("title", node["id"]))
+    subject = state.get("artifact_namespace") or state.get("feature_name") or state.get("game_name", "")
     checklist = "\n".join(
         f"- {item}" for item in node.get("checklist", ["确认本阶段输出可被下一节点消费。"])
     )
@@ -463,7 +517,7 @@ def render_generic_artifact(
 | 项 | 值 |
 |---|---|
 | Run ID | {state["run_id"]} |
-| Game Name | {state["game_name"]} |
+| Artifact Namespace | {subject} |
 | Node | {node["id"]} |
 | Generated At | {now_iso()} |
 """
@@ -785,12 +839,13 @@ def render_validation_report(state: dict[str, Any], node: dict[str, Any], output
 
 
 def run_info(state: dict[str, Any], node: dict[str, Any]) -> str:
+    subject = state.get("artifact_namespace") or state.get("feature_name") or state.get("game_name", "")
     return f"""## 运行信息
 
 | 项 | 值 |
 |---|---|
 | Run ID | {state["run_id"]} |
-| Game Name | {state["game_name"]} |
+| Artifact Namespace | {subject} |
 | Node | {node["id"]} |
 | Generated At | {now_iso()} |
 """

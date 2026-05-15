@@ -15,7 +15,7 @@ class WorkflowPaths:
     state: Path
 
 
-def slugify(value: str, fallback: str = "game") -> str:
+def slugify(value: str, fallback: str = "artifact") -> str:
     import re
 
     normalized = value.strip().lower()
@@ -31,11 +31,13 @@ def now_iso() -> str:
 
 
 def format_template(value: str, state: dict[str, Any]) -> str:
+    artifact_namespace = state.get("artifact_namespace") or state.get("feature_name") or state.get("game_name", "")
     return value.format(
         run_id=state["run_id"],
         goal=state["goal"],
-        game_name=state["game_name"],
+        artifact_namespace=artifact_namespace,
+        feature_name=state.get("feature_name", artifact_namespace),
+        game_name=state.get("game_name", artifact_namespace),
         phase=state.get("phase", ""),
         iteration=state.get("iteration", 0),
     )
-

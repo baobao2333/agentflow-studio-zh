@@ -18,6 +18,8 @@ def main() -> None:
     new_parser.add_argument("--workflow", required=True)
     new_parser.add_argument("--run-id", required=True)
     new_parser.add_argument("--goal", required=True)
+    new_parser.add_argument("--artifact-namespace")
+    new_parser.add_argument("--feature-name")
     new_parser.add_argument("--game-name")
 
     step_parser = subparsers.add_parser("step", help="Advance one node.")
@@ -48,6 +50,7 @@ def main() -> None:
             workflow_path=(root / args.workflow).resolve(),
             goal=args.goal,
             run_id=args.run_id,
+            artifact_namespace=args.artifact_namespace or args.feature_name,
             game_name=args.game_name,
         )
         dashboard = render_dashboard(root=root, state_path=state_path)

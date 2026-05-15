@@ -1,0 +1,25 @@
+id: prd-generation-coordinator
+name: PRD 生成协调器
+language: zh-CN
+description: >
+  协调主 PRD Agent 与规则流程、数据验收、风险运营、HTML 交付专题 Agent，
+  通过产物交接生成可交付 PRD。
+policies:
+  max_blocking_questions_per_gate: 3
+  require_artifact_handoff: true
+  allow_specialist_to_override_source: false
+  require_html_after_delivery_prd: true
+handoff_gates:
+  specialist_to_orchestrator:
+    required_fields:
+      - finding
+      - owning artifact
+      - recommended default
+      - whether earlier artifact must change
+  delivery_to_html:
+    required_fields:
+      - delivery readiness
+      - sign-off defaults
+      - biggest risk
+      - selected html pattern
+      - source note

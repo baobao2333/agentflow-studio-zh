@@ -61,6 +61,41 @@ class EngineTests(unittest.TestCase):
             )
             self.assertEqual(state["phase"], "cocos_implementation")
 
+    def test_prd_workflow_uses_generic_namespace_and_html_artifact(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            shutil.copytree(source_root / "configs", root / "configs")
+            workflow_path = root / "configs/workflows/prd-generation.zh.yaml"
+            state_path = create_run(
+                root=root,
+                workflow_path=workflow_path,
+                goal="生成一个交付级 PRD",
+                run_id="prd-test-run",
+                artifact_namespace="parking-prd",
+            )
+
+            state = step_run(root=root, state_path=state_path)
+            self.assertEqual(state["phase"], "rules_flows")
+            self.assertEqual(state["artifact_namespace"], "parking-prd")
+            self.assertNotIn("cocos_project", state)
+
+            for _ in range(5):
+                state = step_run(root=root, state_path=state_path)
+
+            self.assertEqual(state["phase"], "human_delivery_review")
+            self.assertIn("review_html", state["artifacts"])
+
+            html = (root / state["artifacts"]["review_html"]).read_text(encoding="utf-8")
+            self.assertTrue(html.startswith("<!doctype html>"))
+            self.assertIn("Mock HTML Artifact", html)
+
+            state = step_run(root=root, state_path=state_path)
+            self.assertEqual(state["status"], "paused")
+
 
 if __name__ == "__main__":
     unittest.main()

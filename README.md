@@ -116,6 +116,17 @@ tests/                        最小回归测试
 - `configs/workflows/*.yaml`：节点、流转、人工审阅点、产物路径。
 - `agentflow_studio/adapters.py`：替换节点执行方式，例如接 OpenAI Agents SDK、LangGraph、Codex CLI 或内部服务。
 
+## PRD 多 Agent 示例
+
+仓库也包含一个可复用的 PRD 生成 workflow 示例：
+
+```powershell
+python -m agentflow_studio.cli new --workflow configs/workflows/prd-generation.zh.yaml --run-id prd-demo --goal "为产品功能生成交付级 PRD" --artifact-namespace product-feature
+1..7 | ForEach-Object { python -m agentflow_studio.cli step runs\prd-demo\state.json }
+```
+
+这个示例使用 `mock` adapter，适合验证多 Agent 流程壳、产物交接和人类审阅 gate；真实 PRD 内容质量需要替换为 LLM/Codex adapter。
+
 ## 当前实现状态
 
 当前版本提供一个确定性的 `mock` adapter，用来验证流程、文件交接、人类介入和可视化看板。它会为不同阶段生成不同结构的示例文档，但这些内容仍是 mock draft，不等同于真实 Agent 推理结果。真实接入 LLM 时，建议保留同样的状态结构和回执格式，只替换 adapter。

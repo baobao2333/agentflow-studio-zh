@@ -177,6 +177,9 @@ def make_handler(root: Path, state_path: Path) -> type[BaseHTTPRequestHandler]:
                     workflow_path=selection["path"].resolve(),
                     goal=goal,
                     run_id=run_id,
+                    artifact_namespace=form.get("artifact_namespace", [""])[0].strip()
+                    or form.get("feature_name", [""])[0].strip()
+                    or None,
                     game_name=form.get("game_name", [""])[0].strip() or None,
                 )
                 new_state = read_json(new_state_path)
@@ -881,7 +884,7 @@ def page_shell(
       <p class="muted">输入目标即可，系统会先拆解任务并自动选择可复用的工作流。</p>
       <label>目标<textarea name="goal" required placeholder="例如：做一个俯视角抢车位小游戏"></textarea></label>
       <label>Run ID<input name="run_id" placeholder="留空则按目标生成" /></label>
-      <label>Game Name<input name="game_name" placeholder="可选" /></label>
+      <label>Artifact Namespace<input name="artifact_namespace" placeholder="可选，例如 product-feature" /></label>
       <div class="dialog-actions">
         <button type="button" onclick="document.getElementById('new-studio').close()">取消</button>
         <button type="submit">创建</button>
@@ -1154,6 +1157,24 @@ def choose_workflow(root: Path, goal: str) -> dict:
         raise ValueError("No workflows configured.")
 
     normalized = goal.lower()
+    prd_markers = ["prd", "需求", "产品需求", "需求文档", "产品方案", "拆解", "复刻"]
+    if any(marker in normalized for marker in prd_markers):
+        for path in workflows:
+            data = read_yaml(path)
+            text = f"{data.get('id', '')} {data.get('name', '')}".lower()
+            if "prd" in text:
+                return {
+                    "path": path,
+                    "task_type": "PRD generation workflow",
+                    "reason": "目标包含 PRD/需求/拆解信号，复用 PRD 多 Agent 生成长流程。",
+                    "steps": [
+                        "澄清需求意图和版本边界。",
+                        "分规则流程、数据验收、风险运营专题检查。",
+                        "合并为 delivery PRD。",
+                        "选择 HTML pattern 并进入交付审阅。",
+                    ],
+                }
+
     game_markers = ["cocos", "creator", "游戏", "玩法", "关卡", "小游戏", "game"]
     for path in workflows:
         data = read_yaml(path)

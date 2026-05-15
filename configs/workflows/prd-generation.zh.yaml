@@ -1,0 +1,115 @@
+id: prd-generation
+name: PRD 多 Agent 生成长流程
+version: 0.1.0
+start: intake_boundary
+coordinator:
+  config: configs/coordinators/prd-generation.zh.yaml
+defaults:
+  max_iterations: 3
+nodes:
+  - id: intake_boundary
+    kind: agent
+    title: 需求意图与业务边界
+    agent: prd-orchestrator-agent
+    adapter: mock
+    objective: 澄清产品问题、目标用户、版本边界、非目标和默认假设。
+    checklist:
+      - 产品问题可被一句话解释。
+      - MVP 边界足够小。
+      - 不阻塞的信息被标记为 Assumption 或 Decision needed。
+    outputs:
+      - key: intake_boundary
+        title: 00 Intake And 01 Boundary
+        path: docs/prd-workspace/{artifact_namespace}/00-01-intake-boundary.md
+    next: rules_flows
+
+  - id: rules_flows
+    kind: agent
+    title: 规则与流程挑战
+    agent: prd-rules-flows-agent
+    adapter: mock
+    objective: 检查对象、状态、触发、条件、结果、异常流程和 Rule gap。
+    checklist:
+      - 对象和状态可枚举。
+      - 每条关键规则有触发、条件、结果和用户可见反馈。
+      - 流程不能绕过规则。
+    outputs:
+      - key: rules_flows
+        title: 02 Rules And 03 Flows
+        path: docs/prd-workspace/{artifact_namespace}/02-03-rules-flows.md
+    next: data_acceptance
+
+  - id: data_acceptance
+    kind: agent
+    title: 数据与验收挑战
+    agent: prd-data-acceptance-agent
+    adapter: mock
+    objective: 生成可观察指标、事件、验收标准和 QA 证据要求。
+    checklist:
+      - 指标有口径和 owner。
+      - 验收标准可观察。
+      - 没有捏造目标值。
+    outputs:
+      - key: data_acceptance
+        title: 06 Data Acceptance
+        path: docs/prd-workspace/{artifact_namespace}/06-data-acceptance.md
+    next: risk_ops
+
+  - id: risk_ops
+    kind: agent
+    title: 风险与运营挑战
+    agent: prd-risk-ops-agent
+    adapter: mock
+    objective: 检查运营配置必要性、风险、责任、回滚和历史兼容。
+    checklist:
+      - 管理后台不是为了灵活性而新增。
+      - 风险有控制动作和 owner。
+      - 历史兼容或债务被标记。
+    outputs:
+      - key: risk_ops
+        title: 05 Admin And 07 Risk
+        path: docs/prd-workspace/{artifact_namespace}/05-07-risk-ops.md
+    next: delivery_prd
+
+  - id: delivery_prd
+    kind: agent
+    title: Delivery PRD 合并
+    agent: prd-orchestrator-agent
+    adapter: mock
+    objective: 合并专题结论，压缩为可交付 PRD，并明确签字默认值和最大风险。
+    checklist:
+      - 没有多个同等方案悬空。
+      - Rule gap 已解决或明确阻塞。
+      - PRD 可交给产品、设计、工程、QA 和运营。
+    outputs:
+      - key: delivery_prd
+        title: 08 Delivery PRD
+        path: docs/prd-workspace/{artifact_namespace}/08-delivery-prd.md
+    next: html_handoff
+
+  - id: html_handoff
+    kind: agent
+    title: HTML Pattern 与交付页
+    agent: prd-html-handoff-agent
+    adapter: mock
+    objective: 选择合适 HTML pattern，生成 design-language 和 review HTML。
+    checklist:
+      - 第一屏说明交付状态、核心行为、默认决策和最大风险。
+      - HTML 不修改 PRD 源事实。
+      - 桌面和移动端结构可读。
+    outputs:
+      - key: design_language
+        title: Design Language
+        path: docs/prd-workspace/{artifact_namespace}/design-language.md
+      - key: review_html
+        title: 09 Review HTML
+        path: docs/prd-workspace/{artifact_namespace}/09-review.html
+    next: human_delivery_review
+
+  - id: human_delivery_review
+    kind: human_gate
+    title: 人类交付审阅
+    prompt: 请审阅 delivery PRD 与 HTML handoff。批准后完成；如有缺口请选择 revise。
+    next_on:
+      approve: __end__
+      revise: delivery_prd
