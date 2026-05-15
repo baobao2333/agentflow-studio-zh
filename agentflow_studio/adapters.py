@@ -431,7 +431,7 @@ def build_execution_rules(node: dict[str, Any], cocos_projects: list[Path]) -> s
         "- 不要写 mock、placeholder、示例占位字样。请根据用户目标和上游产物做真实设计、实现或验证。",
         "- 如果信息不足，使用“推荐默认值 + 需确认”推进，不要空等用户。",
         "- 表格要可执行，避免空泛描述。",
-        "- 文件结尾附上“运行信息”表，包含 Run ID、Game Name、Node。",
+        "- 文件结尾附上“运行信息”表，包含 Run ID、Artifact Namespace、Node。",
     ]
 
     if node["id"] == "cocos_implementation":
