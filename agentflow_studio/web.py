@@ -312,7 +312,7 @@ def render_review_page(root: Path, state_path: Path, query: dict[str, list[str]]
         state,
         "review",
         f"""
-        <section class="hero">
+        <section class="hero" data-refresh-key="review-hero">
           <div>
             <p class="eyebrow">review console / artifact handoff</p>
             <h2>审阅工作台</h2>
@@ -321,7 +321,7 @@ def render_review_page(root: Path, state_path: Path, query: dict[str, list[str]]
           <div class="status {escape(state["status"])}">{escape(state["status"])}</div>
         </section>
         <section class="grid">
-          <aside class="panel">
+          <aside class="panel" data-refresh-key="review-sidebar">
             <h3>当前</h3>
             <p>阶段：<code>{escape(state["phase"])}</code></p>
             {actions}
@@ -362,7 +362,7 @@ def render_dashboard_page(root: Path, state_path: Path, query: dict[str, list[st
         state,
         "dashboard",
         f"""
-        <section class="hero">
+        <section class="hero" data-refresh-key="dashboard-hero">
           <div>
             <p class="eyebrow">agentflow studio / execution surface</p>
             <h2>{escape(state["run_id"])}</h2>
@@ -375,23 +375,23 @@ def render_dashboard_page(root: Path, state_path: Path, query: dict[str, list[st
             <button type="button" onclick="openExecutionDetails()">Execution details</button>
           </div>
         </section>
-        {agent_console}
-        {agent_workload}
-        {plan}
-        <section class="panel artifact-strip">
+        <div data-refresh-key="agent-console">{agent_console}</div>
+        <div data-refresh-key="agent-workload">{agent_workload}</div>
+        <div data-refresh-key="studio-plan">{plan}</div>
+        <section class="panel artifact-strip" data-refresh-key="dashboard-artifacts">
           <h3>产物</h3>
           <ul>{artifacts or "<li>暂无产物</li>"}</ul>
         </section>
         <details class="panel technical-details">
           <summary>Technical details</summary>
           <h3>执行轨迹</h3>
-          <ol class="live-log">{live_events}</ol>
+          <ol class="live-log" data-refresh-key="dashboard-live-events">{live_events}</ol>
           <h3>工作流图</h3>
           <pre class="mermaid">{escape(mermaid)}</pre>
           <h3>原始时间线</h3>
           <table>
             <thead><tr><th>时间</th><th>事件</th><th>阶段</th><th>详情</th></tr></thead>
-            <tbody>{history_rows}</tbody>
+            <tbody data-refresh-key="history-rows">{history_rows}</tbody>
           </table>
         </details>
         """,
@@ -643,7 +643,7 @@ def active_agent_entries(state: dict, workflow: dict) -> list[dict]:
 def status_message(state: dict, node: dict) -> str:
     status = state.get("status")
     if status == "working":
-        return f"{node.get('title', state.get('phase'))} 正在执行，页面会自动刷新执行状态。"
+        return f"{node.get('title', state.get('phase'))} 正在执行，页面会自动更新执行状态。"
     if status == "running":
         return f"{node.get('title', state.get('phase'))} 已进入自动执行队列，会继续推进到需要人工介入的位置。"
     if status == "paused":
@@ -708,7 +708,7 @@ def page_shell(
     auto_refresh: bool = False,
 ) -> str:
     studio = quote(state["run_id"])
-    refresh = '<meta http-equiv="refresh" content="5" />' if auto_refresh else ""
+    live_refresh = "true" if auto_refresh else "false"
     sidebar = render_studio_sidebar(root, state)
     execution_dialog = render_execution_dialog(root, state)
     agent_dialog = render_agent_management_dialog(root, state)
@@ -717,7 +717,6 @@ def page_shell(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  {refresh}
   <title>AgentFlow Studio - {escape(state["run_id"])}</title>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
@@ -885,7 +884,7 @@ def page_shell(
     }}
   </style>
 </head>
-<body>
+<body data-live-refresh="{live_refresh}">
   <div class="app-shell">
     {sidebar}
     <main class="workspace">
@@ -909,12 +908,51 @@ def page_shell(
       </div>
     </form>
   </dialog>
-  {execution_dialog}
-  {agent_dialog}
+  <div data-refresh-key="execution-dialog">{execution_dialog}</div>
+  <div data-refresh-key="agent-dialog">{agent_dialog}</div>
   <script>
     window.openNewStudio = () => document.getElementById('new-studio').showModal();
     window.openExecutionDetails = () => document.getElementById('execution-details').showModal();
     window.openAgentManager = () => document.getElementById('agent-manager').showModal();
+
+    (() => {{
+      if (document.body.dataset.liveRefresh !== 'true') return;
+
+      let stopped = false;
+      const replaceLiveRegions = (nextDocument) => {{
+        document.body.dataset.liveRefresh = nextDocument.body.dataset.liveRefresh || 'false';
+        document.querySelectorAll('[data-refresh-key]').forEach((node) => {{
+          if (node.querySelector('dialog[open]')) return;
+          const fresh = nextDocument.querySelector(`[data-refresh-key="${{node.dataset.refreshKey}}"]`);
+          if (fresh) node.replaceWith(fresh);
+        }});
+        stopped = document.body.dataset.liveRefresh !== 'true';
+      }};
+
+      const poll = async () => {{
+        if (stopped) return;
+        try {{
+          const response = await fetch(window.location.href, {{
+            headers: {{ 'X-AgentFlow-Live-Refresh': '1' }},
+            cache: 'no-store',
+          }});
+          if (!response.ok) return;
+          const html = await response.text();
+          const nextDocument = new DOMParser().parseFromString(html, 'text/html');
+          replaceLiveRegions(nextDocument);
+        }} catch (error) {{
+          console.debug('live refresh failed', error);
+        }}
+      }};
+
+      const timer = window.setInterval(() => {{
+        if (stopped) {{
+          window.clearInterval(timer);
+          return;
+        }}
+        poll();
+      }}, 4000);
+    }})();
   </script>
 </body>
 </html>
@@ -941,7 +979,7 @@ def render_studio_sidebar(root: Path, current: dict) -> str:
       <div class="brand">AgentFlow Studio</div>
       <div class="sub">artifact pipeline / human gates</div>
       <button type="button" onclick="openNewStudio()">New Studio</button>
-      <div class="studio-list">{items or "<p class='muted'>暂无 Studio</p>"}</div>
+      <div class="studio-list" data-refresh-key="studio-list">{items or "<p class='muted'>暂无 Studio</p>"}</div>
       {agent_dock}
     </aside>
     """
@@ -971,7 +1009,7 @@ def render_agent_dock(root: Path, current: dict) -> str:
         <span>Agents</span>
         <button type="button" onclick="openAgentManager()">Manage</button>
       </div>
-      <div class="agent-list">{''.join(rows) or "<p class='muted'>暂无挂载 Agent</p>"}</div>
+      <div class="agent-list" data-refresh-key="agent-list">{''.join(rows) or "<p class='muted'>暂无挂载 Agent</p>"}</div>
     </section>
     """
 
